@@ -1,0 +1,31 @@
+# RePrompt - Reverse-Engineering AI Prompts
+
+> RePrompt reverse-engineers visual media into structured AI generation prompts and artifact-suppression negative prompts for Midjourney v7, FLUX 1.1 Pro, Stable Diffusion 3.5 Large, DALL-E 3, and Google Gemini.
+
+## Overview
+- **Application Name**: RePrompt
+- **Description**: Upload an image or video clip to deconstruct composition, estimated lens look, depth of field, lighting scheme, textures, and subject details into high-fidelity AI generation prompts.
+- **Privacy Standard**: Zero Image Storage Architecture. Images and video frames are held transiently in RAM only for the duration of the analysis request and are never written to disk or stored.
+
+## Generation Engine Modes (Image)
+1. **Universal**: Portable, generator-agnostic prompt for all modern models.
+2. **Midjourney v7**: Formatted with aesthetic descriptors, parameters (`--ar`, `--v 7`), and `--style raw`.
+3. **FLUX 1.1 Pro**: Natural language descriptive art direction with optical characteristics.
+4. **Stable Diffusion 3.5 Large**: Structured descriptive clauses with dedicated negative prompts.
+5. **DALL-E 3**: Coherent descriptive prose detailing spatial composition and ambiance.
+6. **Gemini / Imagen 3**: Natural-language visual instructions with clean spatial grounding.
+
+## Detail Level Control
+- **Simple**: 1-2 concise sentences focusing on core subject and main lighting.
+- **Detailed**: Balanced 3-4 sentences covering subject, composition, environment, and textures.
+- **Professional**: Technical visual direction with estimated lens look, lighting setup, and material finishes.
+
+## Public Web Routes
+- `/`: Primary Image-to-Prompt workspace
+- `/video-to-prompt`: Video cinematography prompt workspace
+- `/about`: Engine architecture and target models guide
+- `/privacy`: Data handling and zero-image-storage guarantee
+- `/terms`: Terms of service and usage guidelines
+- `/contact`: Support inquiries and feedback
+- `/sitemap.xml`: XML sitemap
+- `/robots.txt`: Search crawler indexing policy

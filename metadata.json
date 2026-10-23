@@ -1,0 +1,6 @@
+{
+  "name": "Image to Prompt",
+  "description": "Upload any image or video to reverse-engineer detailed, copy-ready AI prompts and negative prompts for Midjourney, FLUX, SD 3.5, Runway, Luma, and Sora.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

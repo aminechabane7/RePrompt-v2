@@ -1,0 +1,5 @@
+User-agent: *
+Allow: /
+Disallow: /api/
+
+Sitemap: https://image-to-prompt-ai-mu.vercel.app/sitemap.xml
