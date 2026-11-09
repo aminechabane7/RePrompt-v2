@@ -1,7 +1,7 @@
 import express, { Request, Response, NextFunction } from 'express';
 import path from 'path';
 import dotenv from 'dotenv';
-import { GoogleGenAI } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel } from '@google/genai';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { validateSignupEmail } from '../lib/disposableEmailValidator';
 
@@ -781,14 +781,24 @@ function parseVisionResponse(rawText: string, mode: string = 'general', targetEn
   };
 }
 
+// Helper to reliably detect timeout errors across models, controllers, and SDK rejections
+export function isTimeoutError(err: any): boolean {
+  if (!err) return false;
+  if (err.code === 'AI_TIMEOUT') return true;
+  if (typeof err.message === 'string' && (err.message === 'AI_TIMEOUT' || err.message.includes('AI_TIMEOUT'))) {
+    return true;
+  }
+  return false;
+}
+
 // 8. Controlled AI Vision Call with Bounded Total Time Budget and Resilient Model Fallback
-// Configured to ensure execution stays well within Vercel platform limits while leaving
+// Configured to ensure execution stays well within Vercel platform limits (60s) while leaving
 // dedicated reserve time for Supabase credit release/cleanup RPC and HTTP responses.
-const TOTAL_VISION_BUDGET_MS = 40000;    // 40s total bounded budget from vision entry
-const CLEANUP_RESERVE_MS = 8000;         // 8s reserved for Supabase reservation release RPC + HTTP response
-const PRIMARY_ATTEMPT_TIMEOUT_MS = 20000; // 20s timeout for primary candidate model attempt
-const MAX_FALLBACK_TIMEOUT_MS = 14000;   // 14s max timeout for fallback model attempt
-const MIN_FALLBACK_BUDGET_MS = 8000;     // At least 8s required to justify attempting fallback model
+const TOTAL_VISION_BUDGET_MS = 50000;    // 50s total bounded budget from vision entry
+const CLEANUP_RESERVE_MS = 6000;         // 6s reserved for Supabase reservation release RPC + HTTP response
+const PRIMARY_ATTEMPT_TIMEOUT_MS = 25000; // 25s timeout for primary candidate model attempt
+const MAX_FALLBACK_TIMEOUT_MS = 18000;   // 18s max timeout for fallback model attempt
+const MIN_FALLBACK_BUDGET_MS = 6000;     // At least 6s required to justify attempting fallback model
 
 async function callGeminiVision(
   base64Data: string,
@@ -828,7 +838,9 @@ async function callGeminiVision(
 
       if (availableForAttemptMs <= 0) {
         console.warn(`[Gemini Vision] Total vision budget exhausted (elapsed: ${elapsedMs}ms, budget: ${TOTAL_VISION_BUDGET_MS}ms). Aborting to preserve credit cleanup.`);
-        throw new Error('AI_TIMEOUT');
+        const budgetErr = new Error('AI_TIMEOUT');
+        (budgetErr as any).code = 'AI_TIMEOUT';
+        throw budgetErr;
       }
 
       const maxTimeoutForCurrentAttempt = isFallbackModel ? MAX_FALLBACK_TIMEOUT_MS : PRIMARY_ATTEMPT_TIMEOUT_MS;
@@ -837,7 +849,9 @@ async function callGeminiVision(
       // If available time is too short for a meaningful Gemini API call, abort cleanly
       if (attemptTimeoutMs < 5000) {
         console.warn(`[Gemini Vision] Insufficient time remaining for attempt (${attemptTimeoutMs}ms < 5000ms). Aborting with AI_TIMEOUT.`);
-        throw new Error('AI_TIMEOUT');
+        const budgetErr = new Error('AI_TIMEOUT');
+        (budgetErr as any).code = 'AI_TIMEOUT';
+        throw budgetErr;
       }
 
       const attemptStartTime = Date.now();
@@ -853,6 +867,12 @@ async function callGeminiVision(
         });
 
         const timeoutId = setTimeout(() => controller.abort(), attemptTimeoutMs);
+
+        // For gemini-3.8-flash, explicitly configure ThinkingLevel.LOW to drastically reduce latency and prevent timeouts
+        const modelConfig: any = {};
+        if (model === 'gemini-3.8-flash') {
+          modelConfig.thinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
+        }
 
         const response = await Promise.race([
           ai.models.generateContent({
@@ -870,10 +890,13 @@ async function callGeminiVision(
                 },
               ],
             },
+            config: Object.keys(modelConfig).length > 0 ? modelConfig : undefined,
           }),
           new Promise<never>((_, reject) => {
             controller.signal.addEventListener('abort', () => {
-              reject(new Error(`AI_TIMEOUT (AbortController triggered after ${attemptTimeoutMs}ms)`));
+              const timeoutErr = new Error('AI_TIMEOUT');
+              (timeoutErr as any).code = 'AI_TIMEOUT';
+              reject(timeoutErr);
             });
           }),
         ]);
@@ -902,17 +925,18 @@ async function callGeminiVision(
 
         lastError = err;
         const attemptDurationMs = Date.now() - (attemptStartTime || startTime);
-        const errStatus = err?.status || err?.statusCode || (err?.message === 'AI_TIMEOUT' ? 504 : 500);
-        const errCode = err?.code || (err?.message === 'AI_TIMEOUT' ? 'AI_TIMEOUT' : 'GEMINI_ERROR');
+        const isTimeout = isTimeoutError(err);
+        const errStatus = err?.status || err?.statusCode || (isTimeout ? 504 : 500);
+        const errCode = err?.code || (isTimeout ? 'AI_TIMEOUT' : 'GEMINI_ERROR');
 
         console.warn(`[Gemini Vision Metrics] Model: ${model} | Attempt: ${attempt + 1} | Duration: ${attemptDurationMs}ms | Status: ${errStatus} | Code: ${errCode} | Error: ${err?.message || err}`);
 
-        // Handle AI_TIMEOUT specifically
-        if (err.message === 'AI_TIMEOUT') {
+        // Handle AI_TIMEOUT specifically with resilient fallback
+        if (isTimeout) {
           // If this was already a timeout fallback model, do NOT allow any further fallbacks
           if (timeoutFallbacksUsed >= 1) {
             console.warn(`[Gemini Vision] Fallback model ${model} also timed out. Timeout fallback limit (1) reached. Terminating fallback chain.`);
-            throw new Error('AI_TIMEOUT');
+            throw err;
           }
 
           // Check if there is another candidate model and sufficient budget remaining for exactly one fallback
@@ -927,7 +951,7 @@ async function callGeminiVision(
             break;
           } else {
             console.warn(`[Gemini Vision] Cannot fall back after timeout on ${model}: ${!hasNextCandidate ? 'no candidate models remaining' : `insufficient remaining budget (${availableForFallbackMs}ms < ${MIN_FALLBACK_BUDGET_MS}ms)`}. Terminating.`);
-            throw new Error('AI_TIMEOUT');
+            throw err;
           }
         }
 
@@ -962,7 +986,8 @@ async function callGeminiVision(
 
 // 9. Centralized Error Mapper: Masks internal secrets while preserving safe diagnostics
 function handleApiError(err: any, res: Response, fallbackMsg: string) {
-  const errCode = err?.status || err?.statusCode || (err?.message === 'AI_TIMEOUT' ? 504 : 500);
+  const isTimeout = isTimeoutError(err);
+  const errCode = err?.status || err?.statusCode || (isTimeout ? 504 : 500);
 
   // Extract cleanest possible message from standard Error, GoogleGenAI ApiError, or string
   let rawMsg = 'Unknown error';
@@ -1003,7 +1028,7 @@ function handleApiError(err: any, res: Response, fallbackMsg: string) {
     });
   }
 
-  if (err?.message === 'AI_TIMEOUT') {
+  if (isTimeout) {
     return res.status(504).json({
       success: false,
       error: 'Your request took too long. The AI service timed out. Please try again.',
@@ -1405,7 +1430,7 @@ app.post('/api/generate-prompt', rateLimiter, async (req: Request, res: Response
         const releaseReason =
           aiError.code === 'DAILY_BETA_CAP_REACHED'
             ? 'DAILY_BETA_CAP_REACHED'
-            : aiError.message === 'AI_TIMEOUT'
+            : isTimeoutError(aiError)
             ? 'AI_TIMEOUT'
             : 'AI_FAILURE';
         try {
@@ -1674,13 +1699,23 @@ ${prompt}`;
           const controller = new AbortController();
           const timeoutId = setTimeout(() => controller.abort(), 20000);
 
+          const modelConfig: any = {};
+          if (model === 'gemini-3.8-flash') {
+            modelConfig.thinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
+          }
+
           const response = await Promise.race([
             ai.models.generateContent({
               model,
               contents: instruction,
+              config: Object.keys(modelConfig).length > 0 ? modelConfig : undefined,
             }),
             new Promise<never>((_, reject) => {
-              controller.signal.addEventListener('abort', () => reject(new Error('AI_TIMEOUT')));
+              controller.signal.addEventListener('abort', () => {
+                const timeoutErr = new Error('AI_TIMEOUT');
+                (timeoutErr as any).code = 'AI_TIMEOUT';
+                reject(timeoutErr);
+              });
             }),
           ]);
           clearTimeout(timeoutId);
@@ -1701,11 +1736,12 @@ ${prompt}`;
           ) {
             throw err;
           }
-          if (err.message === 'AI_TIMEOUT') throw new Error('AI_TIMEOUT');
+          console.warn(`[IMPROVE-PROMPT] Candidate model ${model} failed:`, err?.message || err);
+          continue;
         }
       }
       if (!generationSuccess) {
-        throw new Error('AI service failed to produce an improved prompt.');
+        throw new Error('AI_TIMEOUT');
       }
     } catch (aiErr: any) {
       console.error('[IMPROVE-PROMPT] AI improvement failed:', aiErr?.message || aiErr);
@@ -1714,7 +1750,7 @@ ${prompt}`;
           const releaseReason =
             aiErr.code === 'DAILY_BETA_CAP_REACHED'
               ? 'DAILY_BETA_CAP_REACHED'
-              : aiErr.message === 'AI_TIMEOUT'
+              : isTimeoutError(aiErr)
               ? 'AI_TIMEOUT'
               : 'AI_FAILURE';
           const { error: releaseErr } = await supabaseAdmin.rpc('release_generation_credit', {
@@ -2087,6 +2123,11 @@ app.post('/api/generate-video-prompt', rateLimiter, async (req: Request, res: Re
           const controller = new AbortController();
           const timeoutId = setTimeout(() => controller.abort(), 28000);
 
+          const modelConfig: any = {};
+          if (model === 'gemini-3.8-flash') {
+            modelConfig.thinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
+          }
+
           const response = await Promise.race([
             ai.models.generateContent({
               model,
@@ -2096,9 +2137,14 @@ app.post('/api/generate-video-prompt', rateLimiter, async (req: Request, res: Re
                   { text: `Here are ${validatedParts.length} chronological keyframes extracted from the video sequence. ${promptText}` },
                 ],
               },
+              config: Object.keys(modelConfig).length > 0 ? modelConfig : undefined,
             }),
             new Promise<never>((_, reject) => {
-              controller.signal.addEventListener('abort', () => reject(new Error('AI_TIMEOUT')));
+              controller.signal.addEventListener('abort', () => {
+                const timeoutErr = new Error('AI_TIMEOUT');
+                (timeoutErr as any).code = 'AI_TIMEOUT';
+                reject(timeoutErr);
+              });
             }),
           ]);
           clearTimeout(timeoutId);
@@ -2118,8 +2164,12 @@ app.post('/api/generate-video-prompt', rateLimiter, async (req: Request, res: Re
           ) {
             throw err;
           }
-          if (err.message === 'AI_TIMEOUT') throw new Error('AI_TIMEOUT');
+          console.warn(`[GENERATE-VIDEO] Candidate model ${model} failed:`, err?.message || err);
+          continue;
         }
+      }
+      if (!rawText) {
+        throw new Error('AI_TIMEOUT');
       }
     } catch (aiErr: any) {
       // Release reservation on AI failure or daily cap reached
@@ -2128,7 +2178,7 @@ app.post('/api/generate-video-prompt', rateLimiter, async (req: Request, res: Re
           const releaseReason =
             aiErr?.code === 'DAILY_BETA_CAP_REACHED'
               ? 'DAILY_BETA_CAP_REACHED'
-              : aiErr?.message === 'AI_TIMEOUT'
+              : isTimeoutError(aiErr)
               ? 'AI_TIMEOUT'
               : 'AI_FAILURE';
           const { error: releaseErr } = await supabaseAdmin.rpc('release_generation_credit', {

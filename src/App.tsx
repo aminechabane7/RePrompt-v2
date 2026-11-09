@@ -324,6 +324,10 @@ export default function App() {
           await refreshUsage();
           throw new Error(data?.error || 'The daily beta generation limit has been reached across the platform. Capacity resets daily at 00:00 UTC. Please try again tomorrow.');
         }
+        if (response.status === 504 || data?.code === 'AI_TIMEOUT') {
+          await refreshUsage();
+          throw new Error('AI analysis timed out. Your credits were preserved. Please try again.');
+        }
         throw new Error(data?.error || 'Failed to analyze image and generate prompt.');
       }
 
