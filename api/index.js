@@ -121982,14 +121982,14 @@ function getGeminiApiKey() {
   return rawKey.replace(/^["']|["']$/g, "").trim();
 }
 function getDailyBetaCap() {
-  const envVal = process.env.DAILY_BETA_CAP;
+  const envVal = process.env.DAILY_BETA_GENERATION_LIMIT || process.env.DAILY_BETA_CAP;
   if (envVal) {
     const parsed = parseInt(envVal.trim(), 10);
-    if (!isNaN(parsed) && parsed > 0) {
+    if (!isNaN(parsed) && parsed >= 200) {
       return parsed;
     }
   }
-  return 20;
+  return 200;
 }
 var DailyCapReachedError = class extends Error {
   constructor(message, currentCount, capLimit) {
@@ -122047,6 +122047,7 @@ app.get("/api/health", (_req, res) => {
     status: "ok",
     buildVersion: BUILD_VERSION,
     visionPipelineVersion: VISION_PIPELINE_VERSION,
+    dailyCapLimit: getDailyBetaCap(),
     timestamp: (/* @__PURE__ */ new Date()).toISOString()
   });
 });

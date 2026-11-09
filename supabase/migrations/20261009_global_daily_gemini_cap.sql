@@ -30,7 +30,7 @@ GRANT ALL ON TABLE public.global_daily_usage TO service_role;
 -- Uses PostgreSQL atomic UPDATE with row-locking to guarantee no race conditions across serverless instances.
 -- Returns JSONB with { allowed: boolean, current_count: integer, cap_limit: integer, usage_date: date }
 CREATE OR REPLACE FUNCTION public.check_and_increment_daily_cap(
-  p_cap_limit INTEGER DEFAULT 20
+  p_cap_limit INTEGER DEFAULT 200
 )
 RETURNS JSONB
 LANGUAGE plpgsql
@@ -43,9 +43,9 @@ DECLARE
   v_allowed BOOLEAN;
   v_effective_cap INTEGER;
 BEGIN
-  -- Validate and normalize cap limit (default to 20 if invalid or <= 0)
+  -- Validate and normalize cap limit (default to 200 if invalid or <= 0)
   IF p_cap_limit IS NULL OR p_cap_limit < 1 THEN
-    v_effective_cap := 20;
+    v_effective_cap := 200;
   ELSE
     v_effective_cap := p_cap_limit;
   END IF;
@@ -89,7 +89,7 @@ GRANT EXECUTE ON FUNCTION public.check_and_increment_daily_cap(INTEGER) TO servi
 
 -- 3. Read-only status inspection RPC for monitoring/dashboards
 CREATE OR REPLACE FUNCTION public.get_current_daily_cap_status(
-  p_cap_limit INTEGER DEFAULT 20
+  p_cap_limit INTEGER DEFAULT 200
 )
 RETURNS JSONB
 LANGUAGE plpgsql
@@ -102,7 +102,7 @@ DECLARE
   v_effective_cap INTEGER;
 BEGIN
   IF p_cap_limit IS NULL OR p_cap_limit < 1 THEN
-    v_effective_cap := 20;
+    v_effective_cap := 200;
   ELSE
     v_effective_cap := p_cap_limit;
   END IF;

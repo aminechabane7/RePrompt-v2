@@ -348,14 +348,14 @@ function getGeminiApiKey(): string {
 
 // Global Daily Gemini API Cap configuration and state management
 export function getDailyBetaCap(): number {
-  const envVal = process.env.DAILY_BETA_CAP;
+  const envVal = process.env.DAILY_BETA_GENERATION_LIMIT || process.env.DAILY_BETA_CAP;
   if (envVal) {
     const parsed = parseInt(envVal.trim(), 10);
-    if (!isNaN(parsed) && parsed > 0) {
+    if (!isNaN(parsed) && parsed >= 200) {
       return parsed;
     }
   }
-  return 20; // Default: 20 Gemini attempts per UTC day
+  return 200; // Configured global limit: 200 Gemini attempts per UTC day
 }
 
 export class DailyCapReachedError extends Error {
@@ -437,6 +437,7 @@ app.get('/api/health', (_req: Request, res: Response) => {
     status: 'ok',
     buildVersion: BUILD_VERSION,
     visionPipelineVersion: VISION_PIPELINE_VERSION,
+    dailyCapLimit: getDailyBetaCap(),
     timestamp: new Date().toISOString(),
   });
 });
