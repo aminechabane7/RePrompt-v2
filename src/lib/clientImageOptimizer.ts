@@ -80,10 +80,10 @@ export async function optimizeImageForUpload(
     throw new Error('Image has invalid dimensions (0x0).');
   }
 
-  // Dimension steps for iterative fallback
-  const dimensionSteps = [2048, 1600, 1280, 1024];
+  // Dimension steps for fast AI vision processing (1536px max is optimal for Gemini Vision while keeping payload < 500KB)
+  const dimensionSteps = [1536, 1280, 1024, 800];
   // Quality steps for lossy compression
-  const qualitySteps = [0.88, 0.82, 0.75, 0.68];
+  const qualitySteps = [0.82, 0.75, 0.68, 0.60];
 
   const canvas = document.createElement('canvas');
   const ctx = canvas.getContext('2d', { willReadFrequently: true });

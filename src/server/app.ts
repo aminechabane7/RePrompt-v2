@@ -802,7 +802,7 @@ async function callGeminiVision(
     },
   });
 
-  const candidateModels = ['gemini-3.8-flash', 'gemini-flash-latest', 'gemini-3.1-flash-lite', 'gemini-2.5-flash'];
+  const candidateModels = ['gemini-3.8-flash', 'gemini-flash-latest', 'gemini-3.1-flash-lite'];
   let lastError: any = null;
   const startTime = Date.now();
   let timeoutFallbacksUsed = 0; // Tracks timeout-driven fallbacks (capped at at most 1)
@@ -833,6 +833,7 @@ async function callGeminiVision(
         throw new Error('AI_TIMEOUT');
       }
 
+      const attemptStartTime = Date.now();
       try {
         // Enforce shared global daily Gemini cap immediately before each API attempt (including fallback models)
         await checkAndIncrementGlobalDailyCap();
@@ -884,7 +885,11 @@ async function callGeminiVision(
         }
 
         lastError = err;
-        console.warn(`[Gemini Vision] Model ${model} attempt ${attempt + 1} failed:`, err?.message || err);
+        const attemptDurationMs = Date.now() - (attemptStartTime || startTime);
+        const errStatus = err?.status || err?.statusCode || (err?.message === 'AI_TIMEOUT' ? 504 : 500);
+        const errCode = err?.code || (err?.message === 'AI_TIMEOUT' ? 'AI_TIMEOUT' : 'GEMINI_ERROR');
+
+        console.warn(`[Gemini Vision Metrics] Model: ${model} | Attempt: ${attempt + 1} | Duration: ${attemptDurationMs}ms | Status: ${errStatus} | Code: ${errCode} | Error: ${err?.message || err}`);
 
         // Handle AI_TIMEOUT specifically
         if (err.message === 'AI_TIMEOUT') {
@@ -910,15 +915,18 @@ async function callGeminiVision(
           }
         }
 
-        // Retry 503 high-demand errors once on primary model
-        if (!isFallbackModel && (err.status === 503 || err.message?.includes('503') || err.message?.includes('high demand'))) {
-          if (attempt === 0) {
-            await new Promise((r) => setTimeout(r, 1000));
-            continue;
-          }
+        // Retry temporary 429, 500, 503 and network errors once with backoff (only on primary attempt)
+        const isTransientError = errStatus === 429 || errStatus === 500 || errStatus === 503 || /ECONNRESET|ETIMEDOUT|ENOTFOUND|fetch failed/i.test(err?.message || '');
+        const isNonRetryableAuthOrClientErr = errStatus === 400 || errStatus === 401 || errStatus === 403 || /INVALID_ARGUMENT|API_KEY_INVALID|PERMISSION_DENIED/i.test(err?.message || '');
+
+        if (!isFallbackModel && isTransientError && !isNonRetryableAuthOrClientErr && attempt === 0) {
+          const backoffMs = 1200;
+          console.log(`[Gemini Vision] Retrying transient error (${errStatus} / ${errCode}) on ${model} after ${backoffMs}ms backoff...`);
+          await new Promise((r) => setTimeout(r, backoffMs));
+          continue;
         }
 
-        // If fallback model encountered any other non-timeout error, do not cycle further
+        // If fallback model encountered any non-timeout error or attempt ceiling reached, break loop
         if (isFallbackModel) {
           break;
         }

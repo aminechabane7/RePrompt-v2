@@ -122354,7 +122354,7 @@ async function callGeminiVision(base64Data, mimeType, promptText) {
       }
     }
   });
-  const candidateModels = ["gemini-3.8-flash", "gemini-flash-latest", "gemini-3.1-flash-lite", "gemini-2.5-flash"];
+  const candidateModels = ["gemini-3.8-flash", "gemini-flash-latest", "gemini-3.1-flash-lite"];
   let lastError = null;
   const startTime = Date.now();
   let timeoutFallbacksUsed = 0;
@@ -122376,6 +122376,7 @@ async function callGeminiVision(base64Data, mimeType, promptText) {
         console.warn(`[Gemini Vision] Insufficient time remaining for attempt (${attemptTimeoutMs}ms < 5000ms). Aborting with AI_TIMEOUT.`);
         throw new Error("AI_TIMEOUT");
       }
+      const attemptStartTime = Date.now();
       try {
         await checkAndIncrementGlobalDailyCap();
         console.log(`[Gemini Vision] Requesting model ${model} (attempt ${attempt + 1}, timeout: ${attemptTimeoutMs}ms, elapsed: ${Date.now() - startTime}ms)${isFallbackModel ? " [FALLBACK MODEL 1/1]" : ""}...`);
@@ -122414,7 +122415,10 @@ async function callGeminiVision(base64Data, mimeType, promptText) {
           throw err;
         }
         lastError = err;
-        console.warn(`[Gemini Vision] Model ${model} attempt ${attempt + 1} failed:`, err?.message || err);
+        const attemptDurationMs = Date.now() - (attemptStartTime || startTime);
+        const errStatus = err?.status || err?.statusCode || (err?.message === "AI_TIMEOUT" ? 504 : 500);
+        const errCode = err?.code || (err?.message === "AI_TIMEOUT" ? "AI_TIMEOUT" : "GEMINI_ERROR");
+        console.warn(`[Gemini Vision Metrics] Model: ${model} | Attempt: ${attempt + 1} | Duration: ${attemptDurationMs}ms | Status: ${errStatus} | Code: ${errCode} | Error: ${err?.message || err}`);
         if (err.message === "AI_TIMEOUT") {
           if (timeoutFallbacksUsed >= 1) {
             console.warn(`[Gemini Vision] Fallback model ${model} also timed out. Timeout fallback limit (1) reached. Terminating fallback chain.`);
@@ -122432,11 +122436,13 @@ async function callGeminiVision(base64Data, mimeType, promptText) {
             throw new Error("AI_TIMEOUT");
           }
         }
-        if (!isFallbackModel && (err.status === 503 || err.message?.includes("503") || err.message?.includes("high demand"))) {
-          if (attempt === 0) {
-            await new Promise((r) => setTimeout(r, 1e3));
-            continue;
-          }
+        const isTransientError = errStatus === 429 || errStatus === 500 || errStatus === 503 || /ECONNRESET|ETIMEDOUT|ENOTFOUND|fetch failed/i.test(err?.message || "");
+        const isNonRetryableAuthOrClientErr = errStatus === 400 || errStatus === 401 || errStatus === 403 || /INVALID_ARGUMENT|API_KEY_INVALID|PERMISSION_DENIED/i.test(err?.message || "");
+        if (!isFallbackModel && isTransientError && !isNonRetryableAuthOrClientErr && attempt === 0) {
+          const backoffMs = 1200;
+          console.log(`[Gemini Vision] Retrying transient error (${errStatus} / ${errCode}) on ${model} after ${backoffMs}ms backoff...`);
+          await new Promise((r) => setTimeout(r, backoffMs));
+          continue;
         }
         if (isFallbackModel) {
           break;
