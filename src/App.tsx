@@ -229,7 +229,11 @@ export default function App() {
     }
 
     // 4. Pre-check client usage state
-    if (usage && usage.remaining <= 0) {
+    if (!usage) {
+      setErrorMsg('Verifying generation credits. Please try again in a moment.');
+      return;
+    }
+    if (usage.remaining <= 0) {
       setErrorMsg('Free generation limit reached (3/3 used). Please check your account.');
       return;
     }

@@ -27,7 +27,7 @@ export const AccountView: React.FC<AccountViewProps> = ({ onBack, onNavigate }) 
 
   const generationsUsed = usage?.generationsUsed ?? 0;
   const generationLimit = usage?.generationLimit ?? 3;
-  const remaining = Math.max(0, generationLimit - generationsUsed);
+  const remaining = usage ? Math.max(0, generationLimit - generationsUsed) : null;
   const planName = (profile?.plan || 'free').toUpperCase();
 
   return (
@@ -73,7 +73,7 @@ export const AccountView: React.FC<AccountViewProps> = ({ onBack, onNavigate }) 
               <span>Server-Enforced Usage Allowance</span>
             </h2>
             <span className="text-xs font-semibold text-neutral-900 font-mono">
-              {remaining} of {generationLimit} generations left
+              {remaining !== null ? `${remaining} of ${generationLimit} generations left` : 'Verifying usage allowance...'}
             </span>
           </div>
 

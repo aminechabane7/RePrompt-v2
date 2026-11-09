@@ -18,7 +18,7 @@ export const Header: React.FC<HeaderProps> = ({
 }) => {
   const { user, profile, usage, isConfigured, isPasswordRecovery } = useAuth();
 
-  const remaining = usage ? Math.max(0, usage.generationLimit - usage.generationsUsed) : 3;
+  const remaining = usage ? Math.max(0, usage.generationLimit - usage.generationsUsed) : null;
   const isFreePlan = (profile?.plan || 'free') === 'free';
 
   return (
@@ -138,7 +138,7 @@ export const Header: React.FC<HeaderProps> = ({
             >
               <Zap className="w-3.5 h-3.5 text-amber-500 shrink-0" />
               <span>
-                <strong>{remaining}</strong> left
+                <strong>{remaining !== null ? remaining : '...'}</strong> left
               </span>
             </div>
           )}

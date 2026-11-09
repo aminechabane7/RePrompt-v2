@@ -81,20 +81,43 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   const [isPasswordRecovery, setIsPasswordRecovery] = useState<boolean>(() => checkIsRecoveryFromUrl());
   const [recoveryError, setRecoveryError] = useState<string | null>(() => checkRecoveryErrorFromUrl());
 
+  const activeUserIdRef = React.useRef<string | null>(null);
+
   const fetchProfileAndUsage = async (userId: string, accessToken: string) => {
+    activeUserIdRef.current = userId;
+
+    // Immediately clear profile and usage if switching to a different user ID
+    setUsage((currentUsage) => {
+      if (currentUsage && currentUsage.userId !== userId) {
+        return null;
+      }
+      return currentUsage;
+    });
+
+    setProfile((currentProfile) => {
+      if (currentProfile && currentProfile.id !== userId) {
+        return null;
+      }
+      return currentProfile;
+    });
+
     try {
-      // Fetch user usage from backend or Supabase directly
       const response = await fetch('/api/user/usage', {
         headers: {
           Authorization: `Bearer ${accessToken}`,
         },
       });
 
+      // Drop late responses if the active user changed during the in-flight request
+      if (activeUserIdRef.current !== userId) {
+        return;
+      }
+
       if (response.ok) {
         const contentType = response.headers.get('content-type') || '';
         if (contentType.includes('application/json')) {
           const data = await response.json();
-          if (data.success) {
+          if (data.success && activeUserIdRef.current === userId) {
             setUsage({
               userId,
               generationsUsed: data.generationsUsed ?? 0,
@@ -114,8 +137,21 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       console.warn('Error fetching user profile/usage:', err);
     }
 
-    // Default fallback state if offline or fetch failed
-    setUsage((prev) => prev || { userId, generationsUsed: 0, generationLimit: 3, remaining: 3 });
+    // On fetch failure, if active user is still current, clear stale state belonging to other users
+    if (activeUserIdRef.current === userId) {
+      setUsage((currentUsage) => {
+        if (currentUsage && currentUsage.userId !== userId) {
+          return null;
+        }
+        return currentUsage;
+      });
+      setProfile((currentProfile) => {
+        if (currentProfile && currentProfile.id !== userId) {
+          return null;
+        }
+        return currentProfile;
+      });
+    }
   };
 
   const refreshUsage = async () => {
@@ -132,6 +168,8 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
 
     // 1. Initial session check
     supabase.auth.getSession().then(({ data: { session: initialSession } }) => {
+      const initialUserId = initialSession?.user?.id ?? null;
+      activeUserIdRef.current = initialUserId;
       setSession(initialSession);
       setUser(initialSession?.user ?? null);
       if (initialSession?.user && initialSession.access_token) {
@@ -147,6 +185,15 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange(async (event, currentSession) => {
+      const currentUserId = currentSession?.user?.id ?? null;
+
+      // Immediately clear profile and usage when user ID changes
+      if (currentUserId !== activeUserIdRef.current) {
+        activeUserIdRef.current = currentUserId;
+        setProfile(null);
+        setUsage(null);
+      }
+
       setSession(currentSession);
       setUser(currentSession?.user ?? null);
 
@@ -156,6 +203,8 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       } else if (event === 'SIGNED_OUT') {
         setIsPasswordRecovery(false);
         setRecoveryError(null);
+        setProfile(null);
+        setUsage(null);
       }
 
       if (currentSession?.user && currentSession.access_token) {
