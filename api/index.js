@@ -122040,9 +122040,14 @@ async function checkAndIncrementGlobalDailyCap() {
     usageDate: data.usage_date
   };
 }
+var BUILD_VERSION = "2026-11-09.v2.4.1-diag";
+var VISION_PIPELINE_VERSION = "v2.4.1-vision-pipeline-diag";
 app.get("/api/health", (_req, res) => {
   res.json({
-    status: "ok"
+    status: "ok",
+    buildVersion: BUILD_VERSION,
+    visionPipelineVersion: VISION_PIPELINE_VERSION,
+    timestamp: (/* @__PURE__ */ new Date()).toISOString()
   });
 });
 var SUPPORTED_MIME_TYPES = /* @__PURE__ */ new Set(["image/jpeg", "image/png", "image/webp"]);
@@ -122379,8 +122384,11 @@ async function callGeminiVision(base64Data, mimeType, promptText) {
       const attemptStartTime = Date.now();
       try {
         await checkAndIncrementGlobalDailyCap();
-        console.log(`[Gemini Vision] Requesting model ${model} (attempt ${attempt + 1}, timeout: ${attemptTimeoutMs}ms, elapsed: ${Date.now() - startTime}ms)${isFallbackModel ? " [FALLBACK MODEL 1/1]" : ""}...`);
+        console.log(`[STAGE: GEMINI_REQUEST_STARTED] Model: ${model} | Attempt: ${attempt + 1} | Timeout: ${attemptTimeoutMs}ms | Pipeline: ${VISION_PIPELINE_VERSION}`);
         const controller = new AbortController();
+        controller.signal.addEventListener("abort", () => {
+          console.warn(`[STAGE: ABORT_SIGNAL_TRIGGERED] AbortSignal fired! Reason: ${controller.signal.reason || "Timeout reached"}. Duration: ${Date.now() - attemptStartTime}ms`);
+        });
         const timeoutId = setTimeout(() => controller.abort(), attemptTimeoutMs);
         const response = await Promise.race([
           ai.models.generateContent({
@@ -122400,12 +122408,15 @@ async function callGeminiVision(base64Data, mimeType, promptText) {
             }
           }),
           new Promise((_, reject) => {
-            controller.signal.addEventListener("abort", () => reject(new Error("AI_TIMEOUT")));
+            controller.signal.addEventListener("abort", () => {
+              reject(new Error(`AI_TIMEOUT (AbortController triggered after ${attemptTimeoutMs}ms)`));
+            });
           })
         ]);
         clearTimeout(timeoutId);
+        console.log(`[STAGE: GEMINI_RESPONSE_RECEIVED] Model: ${model} | Attempt duration: ${Date.now() - attemptStartTime}ms`);
         if (response && response.text) {
-          console.log(`[Gemini Vision] Model ${model} succeeded! Result length: ${response.text.length} (total elapsed: ${Date.now() - startTime}ms)`);
+          console.log(`[STAGE: GEMINI_RESPONSE_PARSED] Model: ${model} | Result length: ${response.text.length} chars | Total elapsed: ${Date.now() - startTime}ms`);
           return { text: response.text, modelName: model };
         } else {
           throw new Error(`Model ${model} returned an empty response`);
@@ -122708,6 +122719,7 @@ app.get("/api/user/usage", async (req, res) => {
   }
 });
 app.post("/api/generate-prompt", rateLimiter, async (req, res) => {
+  const reqStart = Date.now();
   try {
     const {
       image,
@@ -122715,10 +122727,10 @@ app.post("/api/generate-prompt", rateLimiter, async (req, res) => {
       targetEngine = "general",
       detailLevel = "detailed"
     } = req.body;
-    console.log(`[GENERATE-PROMPT] Initiating request: mode=${mode}, engine=${targetEngine}, detail=${detailLevel}`);
+    console.log(`[STAGE: REQUEST_RECEIVED] [+0ms] Pipeline: ${VISION_PIPELINE_VERSION} | Build: ${BUILD_VERSION} | Mode: ${mode} | Engine: ${targetEngine} | Detail: ${detailLevel}`);
     const authUser = await verifyAuthUser(req);
     if (!authUser) {
-      console.warn("[GENERATE-PROMPT] Auth failed: no valid user session detected.");
+      console.warn(`[GENERATE-PROMPT] [+${Date.now() - reqStart}ms] Auth failed: no valid user session detected.`);
       res.status(401).json({
         success: false,
         error: "Authentication required. Please sign in or create an account to generate prompts."
@@ -122726,7 +122738,7 @@ app.post("/api/generate-prompt", rateLimiter, async (req, res) => {
       return;
     }
     if (!authUser.isEmailConfirmed) {
-      console.warn(`[GENERATE-PROMPT] Generation rejected: unconfirmed email for user ${authUser.id}`);
+      console.warn(`[GENERATE-PROMPT] [+${Date.now() - reqStart}ms] Generation rejected: unconfirmed email for user ${authUser.id}`);
       res.status(403).json({
         success: false,
         error: "Please verify your email address to unlock AI generations. Check your inbox for the confirmation link.",
@@ -122734,17 +122746,18 @@ app.post("/api/generate-prompt", rateLimiter, async (req, res) => {
       });
       return;
     }
-    console.log(`[GENERATE-PROMPT] User authenticated successfully: id=${authUser.id}, emailConfirmed=true`);
+    console.log(`[GENERATE-PROMPT] [+${Date.now() - reqStart}ms] User authenticated: id=${authUser.id}`);
+    console.log(`[STAGE: IMAGE_OPTIMIZATION_STARTED] [+${Date.now() - reqStart}ms] Input payload length: ${image?.length || 0} chars`);
     const validation = validateAndDecodeImage(image);
     if (validation.error || !validation.data) {
-      console.warn(`[GENERATE-PROMPT] Image validation failed: ${validation.error}`);
+      console.warn(`[GENERATE-PROMPT] [+${Date.now() - reqStart}ms] Image validation failed: ${validation.error}`);
       res.status(validation.status || 400).json({
         success: false,
         error: validation.error
       });
       return;
     }
-    console.log(`[GENERATE-PROMPT] Image validated: mime=${validation.data.mimeType}, size=${validation.data.byteLength} bytes`);
+    console.log(`[STAGE: IMAGE_OPTIMIZATION_COMPLETED] [+${Date.now() - reqStart}ms] Validated MIME: ${validation.data.mimeType}, Byte length: ${validation.data.byteLength} bytes`);
     if (!supabaseAdmin) {
       console.error("[GENERATE-PROMPT] Generation rejected: privileged Supabase client (supabaseAdmin) is unavailable");
       res.status(503).json({
@@ -122754,7 +122767,7 @@ app.post("/api/generate-prompt", rateLimiter, async (req, res) => {
       });
       return;
     }
-    console.log(`[GENERATE-PROMPT] Calling reserve_generation_credit RPC for user: ${authUser.id}`);
+    console.log(`[GENERATE-PROMPT] [+${Date.now() - reqStart}ms] Calling reserve_generation_credit RPC for user: ${authUser.id}`);
     const { data: rpcData, error: rpcError } = await supabaseAdmin.rpc("reserve_generation_credit", {
       target_user_id: authUser.id
     });
@@ -122787,22 +122800,23 @@ app.post("/api/generate-prompt", rateLimiter, async (req, res) => {
       return;
     }
     const reservation = rpcData;
-    console.log(`[GENERATE-PROMPT] Reservation approved: id=${reservation.reservation_id}, remaining=${reservation.remaining}`);
+    console.log(`[GENERATE-PROMPT] [+${Date.now() - reqStart}ms] Reservation approved: id=${reservation.reservation_id}, remaining=${reservation.remaining}`);
     const { mimeType, base64Data } = validation.data;
     const promptText = buildVisionPrompt(mode, targetEngine, detailLevel);
     let rawResult = "";
     let modelName = "";
     try {
-      console.log("[GENERATE-PROMPT] Calling AI Vision service...");
+      console.log(`[GENERATE-PROMPT] [+${Date.now() - reqStart}ms] Dispatching to callGeminiVision...`);
       const visionResult = await callGeminiVision(base64Data, mimeType, promptText);
       rawResult = visionResult.text;
       modelName = visionResult.modelName;
-      console.log(`[GENERATE-PROMPT] AI Vision analysis completed successfully using model: ${modelName}`);
+      console.log(`[GENERATE-PROMPT] [+${Date.now() - reqStart}ms] AI Vision analysis completed successfully using model: ${modelName}`);
     } catch (aiError) {
-      console.error("[GENERATE-PROMPT] AI Vision analysis failed:", aiError?.message || aiError);
+      console.error(`[GENERATE-PROMPT] [+${Date.now() - reqStart}ms] AI Vision analysis failed:`, aiError?.message || aiError);
       if (supabaseAdmin && reservation.reservation_id) {
+        const releaseReason = aiError.code === "DAILY_BETA_CAP_REACHED" ? "DAILY_BETA_CAP_REACHED" : aiError.message === "AI_TIMEOUT" ? "AI_TIMEOUT" : "AI_FAILURE";
         try {
-          const releaseReason = aiError.code === "DAILY_BETA_CAP_REACHED" ? "DAILY_BETA_CAP_REACHED" : aiError.message === "AI_TIMEOUT" ? "AI_TIMEOUT" : "AI_FAILURE";
+          console.log(`[STAGE: CREDIT_RELEASE_STARTED] [+${Date.now() - reqStart}ms] Reason: ${releaseReason} | Reservation: ${reservation.reservation_id}`);
           const { error: releaseErr } = await supabaseAdmin.rpc("release_generation_credit", {
             p_reservation_id: reservation.reservation_id,
             p_reason: releaseReason
@@ -122810,7 +122824,7 @@ app.post("/api/generate-prompt", rateLimiter, async (req, res) => {
           if (releaseErr) {
             console.error("[GENERATE-PROMPT] Error releasing credit reservation:", releaseErr);
           } else {
-            console.log(`[GENERATE-PROMPT] Released reservation ${reservation.reservation_id} due to ${releaseReason}`);
+            console.log(`[STAGE: CREDIT_RELEASE_COMPLETED] [+${Date.now() - reqStart}ms] Released reservation ${reservation.reservation_id} due to ${releaseReason}`);
           }
         } catch (releaseErr) {
           console.error("[GENERATE-PROMPT] Failed to release reservation on AI failure:", releaseErr);
@@ -122905,6 +122919,8 @@ app.post("/api/generate-prompt", rateLimiter, async (req, res) => {
       detailLevel,
       analysis,
       modelUsed: modelName,
+      visionPipelineVersion: VISION_PIPELINE_VERSION,
+      buildVersion: BUILD_VERSION,
       creditsRemaining: finalUsage.remaining,
       generationsUsed: finalUsage.generations_used,
       historySaved,
@@ -123522,8 +123538,10 @@ app.post("/api/generate-video-prompt", rateLimiter, async (req, res) => {
 });
 var app_default = app;
 export {
+  BUILD_VERSION,
   DailyCapCheckError,
   DailyCapReachedError,
+  VISION_PIPELINE_VERSION,
   app_default as default,
   getDailyBetaCap,
   isSupabaseConfigured

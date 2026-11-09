@@ -427,11 +427,17 @@ async function checkAndIncrementGlobalDailyCap(): Promise<{
   };
 }
 
+export const BUILD_VERSION = '2026-11-09.v2.4.1-diag';
+export const VISION_PIPELINE_VERSION = 'v2.4.1-vision-pipeline-diag';
+
 // 5. Health Check Endpoint:
-// Public liveness probe returning minimal status
+// Public liveness probe returning build diagnostics
 app.get('/api/health', (_req: Request, res: Response) => {
   res.json({
     status: 'ok',
+    buildVersion: BUILD_VERSION,
+    visionPipelineVersion: VISION_PIPELINE_VERSION,
+    timestamp: new Date().toISOString(),
   });
 });
 
@@ -838,8 +844,13 @@ async function callGeminiVision(
         // Enforce shared global daily Gemini cap immediately before each API attempt (including fallback models)
         await checkAndIncrementGlobalDailyCap();
 
-        console.log(`[Gemini Vision] Requesting model ${model} (attempt ${attempt + 1}, timeout: ${attemptTimeoutMs}ms, elapsed: ${Date.now() - startTime}ms)${isFallbackModel ? ' [FALLBACK MODEL 1/1]' : ''}...`);
+        console.log(`[STAGE: GEMINI_REQUEST_STARTED] Model: ${model} | Attempt: ${attempt + 1} | Timeout: ${attemptTimeoutMs}ms | Pipeline: ${VISION_PIPELINE_VERSION}`);
         const controller = new AbortController();
+        
+        controller.signal.addEventListener('abort', () => {
+          console.warn(`[STAGE: ABORT_SIGNAL_TRIGGERED] AbortSignal fired! Reason: ${controller.signal.reason || 'Timeout reached'}. Duration: ${Date.now() - attemptStartTime}ms`);
+        });
+
         const timeoutId = setTimeout(() => controller.abort(), attemptTimeoutMs);
 
         const response = await Promise.race([
@@ -860,14 +871,18 @@ async function callGeminiVision(
             },
           }),
           new Promise<never>((_, reject) => {
-            controller.signal.addEventListener('abort', () => reject(new Error('AI_TIMEOUT')));
+            controller.signal.addEventListener('abort', () => {
+              reject(new Error(`AI_TIMEOUT (AbortController triggered after ${attemptTimeoutMs}ms)`));
+            });
           }),
         ]);
 
         clearTimeout(timeoutId);
 
+        console.log(`[STAGE: GEMINI_RESPONSE_RECEIVED] Model: ${model} | Attempt duration: ${Date.now() - attemptStartTime}ms`);
+
         if (response && response.text) {
-          console.log(`[Gemini Vision] Model ${model} succeeded! Result length: ${response.text.length} (total elapsed: ${Date.now() - startTime}ms)`);
+          console.log(`[STAGE: GEMINI_RESPONSE_PARSED] Model: ${model} | Result length: ${response.text.length} chars | Total elapsed: ${Date.now() - startTime}ms`);
           return { text: response.text, modelName: model };
         } else {
           throw new Error(`Model ${model} returned an empty response`);
@@ -1272,6 +1287,7 @@ app.get('/api/user/usage', async (req: Request, res: Response): Promise<void> =>
 
 // POST /api/generate-prompt (Server-Side Credit Enforcement & Auth Guard)
 app.post('/api/generate-prompt', rateLimiter, async (req: Request, res: Response): Promise<void> => {
+  const reqStart = Date.now();
   try {
     const {
       image,
@@ -1280,12 +1296,12 @@ app.post('/api/generate-prompt', rateLimiter, async (req: Request, res: Response
       detailLevel = 'detailed',
     } = req.body;
 
-    console.log(`[GENERATE-PROMPT] Initiating request: mode=${mode}, engine=${targetEngine}, detail=${detailLevel}`);
+    console.log(`[STAGE: REQUEST_RECEIVED] [+0ms] Pipeline: ${VISION_PIPELINE_VERSION} | Build: ${BUILD_VERSION} | Mode: ${mode} | Engine: ${targetEngine} | Detail: ${detailLevel}`);
 
     // 1. Authenticate user from Supabase access token (Never trust client user_id!)
     const authUser = await verifyAuthUser(req);
     if (!authUser) {
-      console.warn('[GENERATE-PROMPT] Auth failed: no valid user session detected.');
+      console.warn(`[GENERATE-PROMPT] [+${Date.now() - reqStart}ms] Auth failed: no valid user session detected.`);
       res.status(401).json({
         success: false,
         error: 'Authentication required. Please sign in or create an account to generate prompts.',
@@ -1294,7 +1310,7 @@ app.post('/api/generate-prompt', rateLimiter, async (req: Request, res: Response
     }
 
     if (!authUser.isEmailConfirmed) {
-      console.warn(`[GENERATE-PROMPT] Generation rejected: unconfirmed email for user ${authUser.id}`);
+      console.warn(`[GENERATE-PROMPT] [+${Date.now() - reqStart}ms] Generation rejected: unconfirmed email for user ${authUser.id}`);
       res.status(403).json({
         success: false,
         error: 'Please verify your email address to unlock AI generations. Check your inbox for the confirmation link.',
@@ -1303,22 +1319,22 @@ app.post('/api/generate-prompt', rateLimiter, async (req: Request, res: Response
       return;
     }
 
-    console.log(`[GENERATE-PROMPT] User authenticated successfully: id=${authUser.id}, emailConfirmed=true`);
+    console.log(`[GENERATE-PROMPT] [+${Date.now() - reqStart}ms] User authenticated: id=${authUser.id}`);
 
     // 2. Validate and inspect file signatures server-side BEFORE checking credits or calling AI
+    console.log(`[STAGE: IMAGE_OPTIMIZATION_STARTED] [+${Date.now() - reqStart}ms] Input payload length: ${image?.length || 0} chars`);
     const validation = validateAndDecodeImage(image);
     if (validation.error || !validation.data) {
-      console.warn(`[GENERATE-PROMPT] Image validation failed: ${validation.error}`);
+      console.warn(`[GENERATE-PROMPT] [+${Date.now() - reqStart}ms] Image validation failed: ${validation.error}`);
       res.status(validation.status || 400).json({
         success: false,
         error: validation.error,
       });
       return;
     }
-    console.log(`[GENERATE-PROMPT] Image validated: mime=${validation.data.mimeType}, size=${validation.data.byteLength} bytes`);
+    console.log(`[STAGE: IMAGE_OPTIMIZATION_COMPLETED] [+${Date.now() - reqStart}ms] Validated MIME: ${validation.data.mimeType}, Byte length: ${validation.data.byteLength} bytes`);
 
     // 3. Server-Side Credit Check & Atomic Reservation via RPC (Fail-Closed)
-    // 3. Server-Side Credit Check & Atomic Reservation via RPC (Unconditional Fail-Closed)
     if (!supabaseAdmin) {
       console.error('[GENERATE-PROMPT] Generation rejected: privileged Supabase client (supabaseAdmin) is unavailable');
       res.status(503).json({
@@ -1329,7 +1345,7 @@ app.post('/api/generate-prompt', rateLimiter, async (req: Request, res: Response
       return;
     }
 
-    console.log(`[GENERATE-PROMPT] Calling reserve_generation_credit RPC for user: ${authUser.id}`);
+    console.log(`[GENERATE-PROMPT] [+${Date.now() - reqStart}ms] Calling reserve_generation_credit RPC for user: ${authUser.id}`);
     const { data: rpcData, error: rpcError } = await supabaseAdmin.rpc('reserve_generation_credit', {
       target_user_id: authUser.id,
     });
@@ -1366,7 +1382,7 @@ app.post('/api/generate-prompt', rateLimiter, async (req: Request, res: Response
     }
 
     const reservation = rpcData;
-    console.log(`[GENERATE-PROMPT] Reservation approved: id=${reservation.reservation_id}, remaining=${reservation.remaining}`);
+    console.log(`[GENERATE-PROMPT] [+${Date.now() - reqStart}ms] Reservation approved: id=${reservation.reservation_id}, remaining=${reservation.remaining}`);
 
     // 4. Perform AI Vision analysis
     const { mimeType, base64Data } = validation.data;
@@ -1376,22 +1392,23 @@ app.post('/api/generate-prompt', rateLimiter, async (req: Request, res: Response
     let modelName = '';
 
     try {
-      console.log('[GENERATE-PROMPT] Calling AI Vision service...');
+      console.log(`[GENERATE-PROMPT] [+${Date.now() - reqStart}ms] Dispatching to callGeminiVision...`);
       const visionResult = await callGeminiVision(base64Data, mimeType, promptText);
       rawResult = visionResult.text;
       modelName = visionResult.modelName;
-      console.log(`[GENERATE-PROMPT] AI Vision analysis completed successfully using model: ${modelName}`);
+      console.log(`[GENERATE-PROMPT] [+${Date.now() - reqStart}ms] AI Vision analysis completed successfully using model: ${modelName}`);
     } catch (aiError: any) {
-      console.error('[GENERATE-PROMPT] AI Vision analysis failed:', aiError?.message || aiError);
+      console.error(`[GENERATE-PROMPT] [+${Date.now() - reqStart}ms] AI Vision analysis failed:`, aiError?.message || aiError);
       // If AI call failed or cap reached, release/refund the unfinalized reservation safely without charging
       if (supabaseAdmin && reservation.reservation_id) {
+        const releaseReason =
+          aiError.code === 'DAILY_BETA_CAP_REACHED'
+            ? 'DAILY_BETA_CAP_REACHED'
+            : aiError.message === 'AI_TIMEOUT'
+            ? 'AI_TIMEOUT'
+            : 'AI_FAILURE';
         try {
-          const releaseReason =
-            aiError.code === 'DAILY_BETA_CAP_REACHED'
-              ? 'DAILY_BETA_CAP_REACHED'
-              : aiError.message === 'AI_TIMEOUT'
-              ? 'AI_TIMEOUT'
-              : 'AI_FAILURE';
+          console.log(`[STAGE: CREDIT_RELEASE_STARTED] [+${Date.now() - reqStart}ms] Reason: ${releaseReason} | Reservation: ${reservation.reservation_id}`);
           const { error: releaseErr } = await supabaseAdmin.rpc('release_generation_credit', {
             p_reservation_id: reservation.reservation_id,
             p_reason: releaseReason,
@@ -1399,7 +1416,7 @@ app.post('/api/generate-prompt', rateLimiter, async (req: Request, res: Response
           if (releaseErr) {
             console.error('[GENERATE-PROMPT] Error releasing credit reservation:', releaseErr);
           } else {
-            console.log(`[GENERATE-PROMPT] Released reservation ${reservation.reservation_id} due to ${releaseReason}`);
+            console.log(`[STAGE: CREDIT_RELEASE_COMPLETED] [+${Date.now() - reqStart}ms] Released reservation ${reservation.reservation_id} due to ${releaseReason}`);
           }
         } catch (releaseErr) {
           console.error('[GENERATE-PROMPT] Failed to release reservation on AI failure:', releaseErr);
@@ -1507,6 +1524,8 @@ app.post('/api/generate-prompt', rateLimiter, async (req: Request, res: Response
       detailLevel,
       analysis,
       modelUsed: modelName,
+      visionPipelineVersion: VISION_PIPELINE_VERSION,
+      buildVersion: BUILD_VERSION,
       creditsRemaining: finalUsage.remaining,
       generationsUsed: finalUsage.generations_used,
       historySaved,
