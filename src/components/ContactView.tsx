@@ -9,16 +9,46 @@ interface ContactViewProps {
 
 export const ContactView: React.FC<ContactViewProps> = ({ onBack, onNavigate }) => {
   const [submitted, setSubmitted] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [email, setEmail] = useState('');
   const [message, setMessage] = useState('');
 
   // Default configured support contact (can be overridden via environment or site config)
   const SUPPORT_EMAIL = 'support@reprompt.app';
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (email && message) {
+    if (!email || !message) return;
+
+    setLoading(true);
+    setErrorMsg(null);
+
+    try {
+      const res = await fetch('/api/contact', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          email: email.trim(),
+          message: message.trim(),
+        }),
+      });
+
+      const data = await res.json().catch(() => ({}));
+
+      if (!res.ok) {
+        setErrorMsg(data.error || 'Failed to submit inquiry. Please check your inputs or try again.');
+        setLoading(false);
+        return;
+      }
+
       setSubmitted(true);
+    } catch (err: any) {
+      setErrorMsg('Network or server error submitting message. Please try again.');
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -94,6 +124,13 @@ export const ContactView: React.FC<ContactViewProps> = ({ onBack, onNavigate }) 
           </div>
         ) : (
           <form onSubmit={handleSubmit} className="space-y-4">
+            {errorMsg && (
+              <div className="p-3.5 rounded-xl bg-red-50 border border-red-200 text-red-700 text-xs flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0 text-red-600" />
+                <span>{errorMsg}</span>
+              </div>
+            )}
+
             <div>
               <label htmlFor="contact-email" className="block text-xs font-semibold text-neutral-700 uppercase tracking-wider mb-1">
                 Your Email Address
@@ -126,9 +163,10 @@ export const ContactView: React.FC<ContactViewProps> = ({ onBack, onNavigate }) 
 
             <button
               type="submit"
-              className="px-6 py-2.5 rounded-xl bg-neutral-900 hover:bg-neutral-800 text-white font-semibold text-xs sm:text-sm transition-colors shadow-xs"
+              disabled={loading}
+              className="px-6 py-2.5 rounded-xl bg-neutral-900 hover:bg-neutral-800 disabled:opacity-50 text-white font-semibold text-xs sm:text-sm transition-colors shadow-xs"
             >
-              Send Message
+              {loading ? 'Submitting...' : 'Send Message'}
             </button>
           </form>
         )}

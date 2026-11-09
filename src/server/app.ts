@@ -174,6 +174,25 @@ app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
   next(err);
 });
 
+// 3b. Security Sanitizer Middleware:
+// NEVER trust role, isPro, plan, price, cost, user_id, or credits passed from the browser.
+// Explicitly strip privilege and billing fields from all incoming request bodies.
+app.use((req: Request, _res: Response, next: NextFunction) => {
+  if (req.body && typeof req.body === 'object' && !Array.isArray(req.body)) {
+    delete (req.body as any).role;
+    delete (req.body as any).isPro;
+    delete (req.body as any).plan;
+    delete (req.body as any).price;
+    delete (req.body as any).cost;
+    delete (req.body as any).user_id;
+    delete (req.body as any).userId;
+    delete (req.body as any).credits;
+    delete (req.body as any).generations_used;
+    delete (req.body as any).generation_limit;
+  }
+  next();
+});
+
 // 4. Server-Side Rate Limiter:
 // In-process memory store for single-instance protection.
 const rateLimitMap = new Map<string, { count: number; resetTime: number }>();
@@ -238,6 +257,78 @@ function emailCheckRateLimiter(req: Request, res: Response, next: NextFunction) 
     return res.status(429).json({
       valid: false,
       error: 'Too many validation requests. Please wait a moment.',
+    });
+  }
+
+  record.count += 1;
+  next();
+}
+
+// 4c. Contact Form Email Rate Limiter:
+// Strictly rate-limits contact and feedback email submissions (max 5 per 15 mins per IP)
+const CONTACT_WINDOW_MS = 15 * 60 * 1000;
+const MAX_CONTACT_REQUESTS = 5;
+const contactRateLimitMap = new Map<string, { count: number; resetTime: number }>();
+
+function contactEmailRateLimiter(req: Request, res: Response, next: NextFunction) {
+  const ip = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() || req.ip || 'anonymous';
+  const now = Date.now();
+  const record = contactRateLimitMap.get(ip);
+
+  if (contactRateLimitMap.size > 2000) {
+    for (const [key, val] of contactRateLimitMap.entries()) {
+      if (now > val.resetTime) contactRateLimitMap.delete(key);
+    }
+  }
+
+  if (!record || now > record.resetTime) {
+    contactRateLimitMap.set(ip, { count: 1, resetTime: now + CONTACT_WINDOW_MS });
+    return next();
+  }
+
+  if (record.count >= MAX_CONTACT_REQUESTS) {
+    const retrySec = Math.ceil((record.resetTime - now) / 1000);
+    res.set('Retry-After', String(retrySec));
+    return res.status(429).json({
+      success: false,
+      error: 'Too many messages submitted from this connection. Please wait 15 minutes before sending another inquiry.',
+      code: 'RATE_LIMIT_EXCEEDED',
+    });
+  }
+
+  record.count += 1;
+  next();
+}
+
+// 4d. Password Reset Email Rate Limiter:
+// Strictly rate-limits password recovery email requests (max 5 per 15 mins per IP)
+const PASSWORD_RESET_WINDOW_MS = 15 * 60 * 1000;
+const MAX_PASSWORD_RESET_REQUESTS = 5;
+const passwordResetRateLimitMap = new Map<string, { count: number; resetTime: number }>();
+
+function passwordResetRateLimiter(req: Request, res: Response, next: NextFunction) {
+  const ip = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() || req.ip || 'anonymous';
+  const now = Date.now();
+  const record = passwordResetRateLimitMap.get(ip);
+
+  if (passwordResetRateLimitMap.size > 2000) {
+    for (const [key, val] of passwordResetRateLimitMap.entries()) {
+      if (now > val.resetTime) passwordResetRateLimitMap.delete(key);
+    }
+  }
+
+  if (!record || now > record.resetTime) {
+    passwordResetRateLimitMap.set(ip, { count: 1, resetTime: now + PASSWORD_RESET_WINDOW_MS });
+    return next();
+  }
+
+  if (record.count >= MAX_PASSWORD_RESET_REQUESTS) {
+    const retrySec = Math.ceil((record.resetTime - now) / 1000);
+    res.set('Retry-After', String(retrySec));
+    return res.status(429).json({
+      success: false,
+      error: 'Too many password reset emails requested. Please wait 15 minutes before requesting another reset link.',
+      code: 'RATE_LIMIT_EXCEEDED',
     });
   }
 
@@ -969,6 +1060,154 @@ const handleValidateEmail = (req: Request, res: Response): void => {
 
 app.post('/api/validate-email', emailCheckRateLimiter, handleValidateEmail);
 app.post('/api/auth/validate-email', emailCheckRateLimiter, handleValidateEmail);
+
+// Rate-Limited Contact Form Endpoint (Requirement 4)
+app.post('/api/contact', contactEmailRateLimiter, async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { email, message } = req.body || {};
+
+    if (!email || typeof email !== 'string') {
+      res.status(400).json({ success: false, error: 'A valid email address is required.' });
+      return;
+    }
+
+    const validation = validateSignupEmail(email);
+    if (!validation.isValid || validation.isDisposable) {
+      res.status(400).json({
+        success: false,
+        error: validation.isDisposable
+          ? 'Temporary or disposable email addresses are not accepted.'
+          : 'Please enter a valid email address format.',
+      });
+      return;
+    }
+
+    if (!message || typeof message !== 'string' || message.trim().length === 0) {
+      res.status(400).json({ success: false, error: 'A message body is required.' });
+      return;
+    }
+
+    if (message.length > 3000) {
+      res.status(400).json({ success: false, error: 'Message exceeds maximum length of 3,000 characters.' });
+      return;
+    }
+
+    console.log(`[CONTACT FORM] Message received from ${email.trim()} (IP: ${req.ip || 'unknown'})`);
+
+    res.json({
+      success: true,
+      message: 'Thank you for your message! Our team has recorded your inquiry.',
+    });
+  } catch (err) {
+    console.error('[CONTACT FORM] Exception processing contact form:', err);
+    res.status(500).json({ success: false, error: 'Failed to process inquiry. Please try again.' });
+  }
+});
+
+// Rate-Limited Password Reset Email Pre-Check Endpoint (Requirement 4)
+app.post('/api/auth/request-password-reset', passwordResetRateLimiter, async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { email } = req.body || {};
+
+    if (!email || typeof email !== 'string') {
+      res.status(400).json({ success: false, error: 'Email address is required.' });
+      return;
+    }
+
+    const validation = validateSignupEmail(email);
+    if (!validation.isValid) {
+      res.status(400).json({ success: false, error: 'Please enter a valid email address format.' });
+      return;
+    }
+
+    res.json({
+      success: true,
+      allowed: true,
+      message: 'Rate limit check passed.',
+    });
+  } catch (err) {
+    console.error('[PASSWORD RESET] Error checking rate limit:', err);
+    res.status(500).json({ success: false, error: 'Password reset service error.' });
+  }
+});
+
+// Delete Single History Item with Server-Side Ownership Check (Requirement 5)
+app.delete('/api/history/:id', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const authUser = await verifyAuthUser(req);
+    if (!authUser) {
+      res.status(401).json({ success: false, error: 'Authentication required.' });
+      return;
+    }
+
+    const { id } = req.params;
+    if (!id || typeof id !== 'string') {
+      res.status(400).json({ success: false, error: 'Valid generation ID required.' });
+      return;
+    }
+
+    if (!supabaseAdmin) {
+      res.status(503).json({ success: false, error: 'Database service unavailable.', code: 'SERVICE_ROLE_UNAVAILABLE' });
+      return;
+    }
+
+    // Server-side ownership check before deletion (Requirement 5)
+    const { error, count } = await supabaseAdmin
+      .from('generations')
+      .delete({ count: 'exact' })
+      .eq('id', id)
+      .eq('user_id', authUser.id);
+
+    if (error) {
+      console.error('[HISTORY DELETE] Database error:', error);
+      res.status(500).json({ success: false, error: 'Failed to delete history record.' });
+      return;
+    }
+
+    if (count === 0) {
+      res.status(404).json({ success: false, error: 'Record not found or you do not have permission to delete it.' });
+      return;
+    }
+
+    res.json({ success: true, deletedId: id });
+  } catch (err) {
+    console.error('[HISTORY DELETE] Exception:', err);
+    res.status(500).json({ success: false, error: 'Server error during deletion.' });
+  }
+});
+
+// Clear All User History with Server-Side Ownership Check (Requirement 5)
+app.delete('/api/history', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const authUser = await verifyAuthUser(req);
+    if (!authUser) {
+      res.status(401).json({ success: false, error: 'Authentication required.' });
+      return;
+    }
+
+    if (!supabaseAdmin) {
+      res.status(503).json({ success: false, error: 'Database service unavailable.', code: 'SERVICE_ROLE_UNAVAILABLE' });
+      return;
+    }
+
+    // Server-side ownership check before bulk deletion (Requirement 5)
+    const { error } = await supabaseAdmin
+      .from('generations')
+      .delete()
+      .eq('user_id', authUser.id);
+
+    if (error) {
+      console.error('[HISTORY CLEAR] Database error:', error);
+      res.status(500).json({ success: false, error: 'Failed to clear history records.' });
+      return;
+    }
+
+    res.json({ success: true, message: 'All user history records cleared successfully.' });
+  } catch (err) {
+    console.error('[HISTORY CLEAR] Exception:', err);
+    res.status(500).json({ success: false, error: 'Server error during history clear.' });
+  }
+});
 
 // GET /api/user/usage - Retrieves authenticated user's current server usage
 app.get('/api/user/usage', async (req: Request, res: Response): Promise<void> => {

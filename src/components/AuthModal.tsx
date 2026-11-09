@@ -238,6 +238,18 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         setSuccessMsg('Signed in successfully.');
         setTimeout(() => onClose(), 800);
       } else if (mode === 'forgot') {
+        // Enforce rate limiting on password reset emails (Requirement 4)
+        const rateCheckRes = await fetch('/api/auth/request-password-reset', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: email.trim() }),
+        });
+
+        if (!rateCheckRes.ok) {
+          const rateData = await rateCheckRes.json().catch(() => ({}));
+          throw new Error(rateData.error || 'Too many password reset requests. Please wait a few minutes before trying again.');
+        }
+
         const resetOptions: { redirectTo?: string; captchaToken?: string } = {
           redirectTo: `${window.location.origin}/`,
         };
